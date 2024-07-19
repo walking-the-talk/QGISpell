@@ -1,0 +1,40 @@
+# This file contains metadata for your plugin. Since 
+# version 2.0 of QGIS this is the proper way to supply 
+# information about a plugin. The old method of 
+# embedding metadata in __init__.py will 
+# is no longer supported since version 2.0.
+
+# This file should be included when you package your plugin.# Mandatory items:
+
+[general]
+name=QGISpell
+qgisMinimumVersion=3.00
+qgisMaximumVersion=3.99
+description=Creates context menu spell checking for attribute data based on ENCHANT libraries
+version=0.1
+author=Chris York (Walking-the-Talk)
+email=chris.york@walking-the-talk.co.uk
+
+about= This is  proof of concept plugin for Spell Checking your attribute data. It is necessarily clunky because QGIS does not expose the python bindings to allow the native attribute forms to use this functionality - so this uses basic functions from gotonextfeature3 plugin for navigating through features. It's possible to select an attribute of a layer in edit mode and loop through each feature.  It's possible to use a PAN function or a Zoom function (useful for polygons and lines). 
+
+tracker=https://github.walking-the-talk/qgispell/issues
+repository=https://github.walking-the-talk/qgispell
+# End of mandatory metadata
+
+# Recommended items:
+
+# Uncomment the following line and add your changelog:
+# changelog=
+
+# Tags are comma separated with spaces allowed
+tags= Spelling, attributes
+
+homepage=https://github.walking-the-talk/qgispell
+category=Plugins
+icon=icon.png
+# experimental flag
+experimental=True
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
+
