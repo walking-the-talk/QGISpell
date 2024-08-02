@@ -74,12 +74,16 @@ import os
 from collections import OrderedDict
 from .geo_utils import utils as geo_utils, vector_utils as vutils
 from qgis.gui import QgsMapLayerComboBox, QgsFieldComboBox, QgsMessageBar
-from qgis.core import QgsProject, Qgis, QgsMapLayerProxyModel, QgsFieldProxyModel,edit
+from qgis.core import QgsProject, Qgis, QgsMapLayerProxyModel, QgsFieldProxyModel, edit, QgsFeature, QgsCoordinateReferenceSystem, QgsCoordinateTransform
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import pyqtSignal, Qt, QRect
 from qgis.PyQt.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QFrame, QFormLayout, QLabel, QLineEdit, QHBoxLayout, QTabWidget,\
     QScrollArea, QRadioButton, QButtonGroup, QCheckBox, QPushButton, QShortcut, QDockWidget, QSizePolicy, QSpacerItem, QGroupBox
 from qgis.PyQt.QtGui import QKeySequence, QCursor
+
+#Identify
+from qgis.gui import QgsMapToolIdentifyFeature
+from PyQt5.QtGui import QCursor
 
 from . import buttons_utils
 import operator
@@ -147,8 +151,9 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
 
     def setup(self):
         self.setWindowTitle(QGISpellDockWidget.plugin_name)
-        self.layer = self.iface.activeLayer() #get the active layer
-        self.populateLayers()
+        self.canvas = self.iface.mapCanvas()
+        #self.layer = self.iface.activeLayer() #get the active layer
+
 
         #Connect form actions to signals
 
@@ -162,8 +167,10 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
         self.btn_last.pressed.connect(self.btn_last_pressed)
         self.save_record.pressed.connect(self.save_record_pressed)
         self.cancel_record.pressed.connect(self.cancel_save)
+        self.identify_feature.toggled.connect(self.identify_features)
+        self.selected_feature = QgsFeature()
+        QgsProject.instance().readProject.connect(self.onLoadProject)
 
-        #QgsProject.instance().layerRemoved.connect(self.populateLayers)
 
         # Set controls
 
@@ -178,24 +185,32 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
         shortcut.setContext(Qt.ApplicationShortcut)
         shortcut.activated.connect(self.btn_next_pressed)
         #self.update_textboxes()
+        self.populateLayers()
+        
+    def onLoadProject(self):
+        self.map_layers = QgsProject.instance()
+        self.populateLayers()
+        self.layer_label.setText('Layer: ')
+        self.layer_label.setStyleSheet("background: None")
 
     def populateLayers(self):
-        try:
-            self.map_layers = QgsProject.instance().mapLayers().values()
-            self.allow_list = [lyr.id() for lyr in self.map_layers if lyr.type() == QgsMapLayerType.VectorLayer] #  and lyr.isEditable()]
-            self.except_list = [l for l in self.map_layers if l.id() not in self.allow_list]
-            self.MapLayer.setExceptedLayerList(self.except_list)
-            #activelayer = QgsProject.instance().mapLayersByName(self.layer.name())[0]
-            #self.MapLayer.setCurrentText(activelayer.name())
-            #print(activelayer.name(),'current',self.layer.name(), 'combo',self.MapLayer)
-            self.feats_od.clear()
-            feats_d = {}
-        except:
-            return
+        #try:
+        self.map_layers = QgsProject.instance().mapLayers().values()
+        self.visible_layers = QgsProject.instance().layerTreeRoot()
+        self.allow_list = [lyr.id() for lyr in self.map_layers if lyr.type() == QgsMapLayerType.VectorLayer and self.visible_layers.findLayer(lyr).isVisible()]
+        #layers available: vector and currently visible on canvas. Then filter the combobox to exclude other layers
+        self.except_list = [l for l in self.map_layers if l.id() not in self.allow_list]
+        self.MapLayer.setExceptedLayerList(self.except_list)
+        self.MapLayer.setAllowEmptyLayer(True)
+        self.MapLayer.setCurrentIndex(0)
+        self.feats_od.clear()
+        feats_d = {}
+        #except:
+        #    return
 
     def update_textboxes(self):
     
-        #on Spelling tab reset the layer fields - remove any existing from the previous layer
+        #When changing layer: on Spelling tab reset the layer fields - remove any existing from the previous layer
         for i in reversed(range(self.formLayout.count())): 
             widgetToRemove = self.formLayout.itemAt(i).widget()
             # remove it from the layout list
@@ -203,49 +218,100 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
             # remove it from the gui
             widgetToRemove.setParent(None)
         self.currentfeature = []
-        layername = self.MapLayer.currentLayer()
-        self.layer_label.setText('Layer: '+str(layername.name()))
-        self.layer_label.setStyleSheet("background: DarkSeaGreen")
-        self.FieldOrderBy.setLayer(layername)
-        self.widgetBox = QWidget()
-        #print("Loading layer: ", layername, self.FieldOrderBy.fields())  
-        # get the list of selected layer's fields
-        self.fields = [(field.name(), field.type()) for field in self.FieldOrderBy.fields()]
-        # add QLabels and SpellTextEdit (text fields) / QLineEdits inside frame
+        self.currentLayer = self.MapLayer.currentLayer()
+        if self.currentLayer:
+            self.layer_label.setText('Layer: '+str(self.currentLayer.name()))
+            self.layer_label.setStyleSheet("background: DarkSeaGreen")
+            self.FieldOrderBy.setLayer(self.currentLayer)
+            self.widgetBox = QWidget()
+            #print("Loading layer: ", self.currentLayer, self.FieldOrderBy.fields())  
+            # get the list of selected layer's fields
+            self.fields = [(field.name(), field.type()) for field in self.FieldOrderBy.fields()]
+            # add QLabels and SpellTextEdit (text fields) / QLineEdits inside frame
+            for row,(field_name, field_type) in enumerate(self.fields):
+                # label as illustrative scope
+                #print(field_name, field_type)
+                fieldlabel = QLabel(field_name) 
+                if field_type == 10:
+                    self.currentfeature.append(SpellTextEdit())
+                    #self.currentfeature[row].setEnabled(True)
+                else:
+                    self.currentfeature.append(QLineEdit())
+                    #self.currentfeature[row].setEnabled(False)
+                self.formLayout.addRow(fieldlabel,self.currentfeature[-1])
+                fields = self.MapLayer.currentLayer().fields()
+                #do not enable fields from joined layers
+                if fields.fieldOrigin(row) == 2 or field_type != 10:
+                    self.currentfeature[row].setEnabled(False)            
+                else:
+                    self.currentfeature[row].setEnabled(True) 
+            #print(self.currentfeature)
+            self.widgetBox.setLayout(self.formLayout)
+            self.scrollArea.setWidget(self.widgetBox)
+            self.scrollArea.setWidgetResizable(True)
+            #resize to the available space
+            widgetheight = self.fra_main.frameGeometry().height()
+            widgetwidth = self.fra_main.frameGeometry().width()
+            self.Tabs.resize(widgetwidth - 15,widgetheight - 20)
+            self.scrollArea.resize(widgetwidth - 15,widgetheight - 75)
+            self.ft_pos = -1
+            self.mapTool = None
+            self.identify_feature.setChecked(False)
+            self.cbo_attrib_activated()
+
+    def identify_features(self):
+        self.mapTool = None
+        if self.identify_feature.isChecked():
+            self.btn_first.setEnabled(False)
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            self.btn_last.setEnabled(False)
+            self.mapTool = QgsMapToolIdentifyFeature(self.canvas)
+            self.mapTool.setLayer(self.MapLayer.currentLayer())
+            self.cursor = QCursor()
+            self.cursor.setShape(Qt.WhatsThisCursor)
+            self.mapTool.setCursor(self.cursor)
+            self.canvas.setMapTool(self.mapTool)
+            self.mapTool.featureIdentified.connect(self.onFeatureIdentified)
+        else:
+            #reset the increment to start again - TODO: find a way of continuing from the last identified feature
+            self.ft_pos = -1
+            self.cbo_attrib_activated()
+            self.selected_feature = QgsFeature()
+           
+            
+    def onFeatureIdentified(self, feature):
+       #check if the feature has been changed in Text boxes
+        if self.selected_feature.id() >=0:
+            for row,(field_name, field_type) in enumerate(self.fields):
+                if field_type == 10:
+                    prev_value = self.selected_feature.attribute(field_name) 
+                    print('selected', self.selected_feature.id(), prev_value, self.currentfeature[row].toPlainText())
+                    if self.currentfeature[row].toPlainText() != str(prev_value):
+                        self.currentfeature[row].setStyleSheet("background: red")
+                        self.save_record.setStyleSheet("background: red")
+                        return        
+        self.save_record.setStyleSheet("background: None")
+        self.selected_feature = feature
+        ft = feature.id()
+        self.CountFeatures.setText("%d of %d features" % (ft, len(self.feats_od)))
+        # update the values in each text box
         for row,(field_name, field_type) in enumerate(self.fields):
-            # label as illustrative scope
-            #print(field_name, field_type)
-            fieldlabel = QLabel(field_name) 
+            attrib_value = feature.attribute(field_name) 
+            #print(attrib_value)
             if field_type == 10:
-                self.currentfeature.append(SpellTextEdit())
-                #self.currentfeature[row].setEnabled(True)
+                self.currentfeature[row].setPlainText(str(attrib_value))
+                self.currentfeature[row].setStyleSheet("background: None") 
             else:
-                self.currentfeature.append(QLineEdit())
-                #self.currentfeature[row].setEnabled(False)
-            self.formLayout.addRow(fieldlabel,self.currentfeature[-1])
-            fields = self.MapLayer.currentLayer().fields()
-            #do not enable fields from joined layers
-            if fields.fieldOrigin(row) == 2 or field_type != 10:
-                self.currentfeature[row].setEnabled(False)            
-            else:
-                self.currentfeature[row].setEnabled(True) 
-        #print(self.currentfeature)
-        self.widgetBox.setLayout(self.formLayout)
-        self.scrollArea.setWidget(self.widgetBox)
-        self.scrollArea.setWidgetResizable(True)
-        #resize to the available space
-        widgetheight = self.fra_main.frameGeometry().height()
-        widgetwidth = self.fra_main.frameGeometry().width()
-        self.Tabs.resize(widgetwidth - 15,widgetheight - 20)
-        self.scrollArea.resize(widgetwidth - 15,widgetheight - 75)
-        self.ft_pos = -1
-        self.cbo_attrib_activated()
-
-
+                self.currentfeature[row].setText(str(attrib_value))
+        
 
     def save_record_pressed(self):
 
-        fid = self.feats_od[self.ft_pos].id() # get the row number
+        if self.identify_feature.isChecked():
+            fid = self.selected_feature.id()
+        else:
+            fid = self.feats_od[self.ft_pos].id() # get the row number
         
         CurrentLayer = self.MapLayer.currentLayer()
         if CurrentLayer.isEditable() :
@@ -254,8 +320,17 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
                 if field_type == 10:
                     CurrentLayer.changeAttributeValue(fid,row, self.currentfeature[row].toPlainText())
                     self.currentfeature[row].setStyleSheet("background: None") 
+                    #print('is.editable', fid, self.currentfeature[row].toPlainText())
+#               allow integers and decimals to be updated - for future!
+#                elif field_type == 4:
+#                    CurrentLayer.changeAttributeValue(fid,row, float(self.currentfeature[row].currentText()))
+#                    self.currentfeature[row].setStyleSheet("background: None") 
+#                elif field_type == 2:
+#                    CurrentLayer.changeAttributeValue(fid,row, int(self.currentfeature[row].currentText()))
+#                    self.currentfeature[row].setStyleSheet("background: None")                 
                 else:
                     pass
+
         else:
             with edit(CurrentLayer):
                 for row,(field_name, field_type) in enumerate(self.fields):
@@ -263,19 +338,26 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
                     if field_type == 10:
                         CurrentLayer.changeAttributeValue(fid,row, self.currentfeature[row].toPlainText())
                         self.currentfeature[row].setStyleSheet("background: None") 
-                    else:
+                        #print('edit', fid, self.currentfeature[row].toPlainText())
+                else:
                         pass
-
+        self.selected_feature = CurrentLayer.getFeature(fid)
         self.save_record.setStyleSheet("background: DarkSeaGreen")
         self.btn_next.setStyleSheet("background: None")
         self.btn_prev.setStyleSheet("background: None")
-        self.cbo_attrib_activated()
+#        self.cbo_attrib_activated()
              
 
     def cancel_save(self):
+
+
         #reset fields to their stored value
         for row,(field_name, field_type) in enumerate(self.fields):
-            attrib_value = self.feats_od[self.ft_pos].attribute(field_name) 
+            if self.identify_feature.isChecked():
+                attrib_value = self.selected_feature.attribute(field_name) 
+            else:
+                #fid = self.feats_od[self.ft_pos].id() # get the row number
+                attrib_value = self.feats_od[self.ft_pos].attribute(field_name) 
             #print(attrib_value)
             if field_type == 10:
                 self.currentfeature[row].setPlainText(str(attrib_value))
@@ -287,7 +369,7 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
 
  
     def closeEvent(self, event):
-#        layer = nothing
+        self.currentLayer = None
         self.closingPlugin.emit()
         event.accept()
 
@@ -344,59 +426,49 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
         self.chk_use_sel.setEnabled(True)
         self.FieldOrderBy.setEnabled(True) 
         self.btn_next.setEnabled(True)
-        self.btn_next_pressed()  
+        self.btn_last.setEnabled(True)
+        self.btn_first.setEnabled(True)
+#        self.btn_next_pressed()  
    
     def btn_first_pressed(self):
 
         start_point = -(self.ft_pos)
         self.move_ft(start_point)
-        self.save_record.setStyleSheet("background: None")
-        self.CountFeatures.setText("%d of %d features" % (1, len(self.feats_od)))
-        #print(self.feats_od[1])
-        if self.ft_pos >= len(self.feats_od) - 1:
-            self.btn_next.setEnabled(False)
+#        self.save_record.setStyleSheet("background: None")
+#        self.CountFeatures.setText("%d of %d features" % (1, len(self.feats_od)))
 
-        if len(self.feats_od) > 1 and self.ft_pos > 0:
-            self.btn_prev.setEnabled(True)
 
    
     def btn_prev_pressed(self):
 
         self.move_ft(-1)
-        self.save_record.setStyleSheet("background: None")
-        self.CountFeatures.setText("%d of %d features" % ((self.ft_pos + 1), len(self.feats_od)))
-        self.btn_next.setEnabled(True)
-        if self.ft_pos <= 0:
-            self.btn_prev.setEnabled(False)
+#        self.save_record.setStyleSheet("background: None")
+#        self.CountFeatures.setText("%d of %d features" % ((self.ft_pos + 1), len(self.feats_od)))
+
 
     def btn_next_pressed(self):
 
         self.move_ft(1)
-        self.save_record.setStyleSheet("background: None")
-        self.CountFeatures.setText("%d of %d features" % ((self.ft_pos + 1), len(self.feats_od)))
-        #print(self.feats_od[1])
-        if self.ft_pos >= len(self.feats_od) - 1:
-            self.btn_next.setEnabled(False)
+#        self.save_record.setStyleSheet("background: None")
+#        self.CountFeatures.setText("%d of %d features" % ((self.ft_pos + 1), len(self.feats_od)))
 
-        if len(self.feats_od) > 1 and self.ft_pos > 0:
-            self.btn_prev.setEnabled(True)
 
     def btn_last_pressed(self):
 
         end_point = len(self.feats_od) - self.ft_pos
         self.move_ft(end_point)
-        self.save_record.setStyleSheet("background: None")
-        self.CountFeatures.setText("%d of %d features" % (len(self.feats_od), len(self.feats_od)))
-        #print(self.feats_od[1])
-        if self.ft_pos >= len(self.feats_od) - 1:
-            self.btn_next.setEnabled(False)
 
-        if len(self.feats_od) > 1 and self.ft_pos > 0:
-            self.btn_prev.setEnabled(True)
+
 
 
     def move_ft(self, increment):
 
+        #use of ordered dict means that its not easy to move to next feature after using identify tool (rather than restarting) - so this doesn't work!
+        #if self.selected_feature.id() >=0:
+        #    for i,data in self.feats_od:
+        #        if self.feats_od[i].id() = self.selected_feature.id():
+        #            self.ft_pos = i
+        #    self.selected_feature() = nothing
         if self.ft_pos > -1:
             #check if the feature has been changed in Text boxes
             for row,(field_name, field_type) in enumerate(self.fields):
@@ -428,31 +500,36 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
             if self.sel_ft_pos == 0:
                 self.btn_prev.setEnabled(False)
 
-
         if 0 <= self.ft_pos < len(self.feats_od):
+            try:
+                renderer = self.iface.mapCanvas().mapSettings()
+                geom = self.feats_od[self.ft_pos].geometry()
 
-            renderer = self.iface.mapCanvas().mapSettings()
-            geom = self.feats_od[self.ft_pos].geometry()
+                if geom is None:
+                    self.iface.messageBar().pushInfo(
+                        QGISpellDockWidget.plugin_name,
+                        'The geometry of the feature is null: can neither zoom nor pan to it.')  # TODO: softcode
 
-            if geom is None:
-                self.iface.messageBar().pushInfo(
-                    QGISpellDockWidget.plugin_name,
-                    'The geometry of the feature is null: can neither zoom nor pan to it.')  # TODO: softcode
+                else:
 
-            else:
+                    if self.identify_feature.isChecked():
+                        pass
+                    elif self.rad_action_pan.isChecked():
+                        self.iface.mapCanvas().setCenter(renderer.layerToMapCoordinates(
+                            self.currentLayer,
+                            geom.centroid().asPoint()))
 
-                if self.rad_action_pan.isChecked():
-                    self.iface.mapCanvas().setCenter(renderer.layerToMapCoordinates(
-                        self.layer,
-                        geom.centroid().asPoint()))
+                    elif self.rad_action_zoom.isChecked():
+                        self.iface.mapCanvas().setExtent(renderer.layerToMapCoordinates(
+                            self.currentLayer,
+                            geom.boundingBox()))
+                        self.iface.mapCanvas().zoomByFactor(1.1)
+                    
 
-                elif self.rad_action_zoom.isChecked():
-                    self.iface.mapCanvas().setExtent(renderer.layerToMapCoordinates(
-                        self.layer,
-                        geom.boundingBox()))
-                    self.iface.mapCanvas().zoomByFactor(1.1)
 
-            self.iface.mapCanvas().refresh()
+                self.iface.mapCanvas().refresh()
+            except:
+                pass
             fields = [(field.name(), field.type()) for field in self.MapLayer.currentLayer().fields()]
 
             # update the values in each text box
@@ -465,8 +542,17 @@ class QGISpellDockWidget(QDockWidget, FORM_CLASS):
                 else:
                     self.currentfeature[row].setText(str(attrib_value))
 
-                
+        if self.ft_pos >= len(self.feats_od) - 1:
+            self.btn_next.setEnabled(False)
+        else:
+            self.btn_next.setEnabled(True)
 
+        if len(self.feats_od) > 1 and self.ft_pos > 0:
+            self.btn_prev.setEnabled(True)
+        else:
+            self.btn_prev.setEnabled(False)   
+        self.save_record.setStyleSheet("background: None")
+        self.CountFeatures.setText("%d of %d features" % (self.ft_pos+1, len(self.feats_od)))
 
 
 # This is the heavy lifting of Spell Checking
